@@ -1,0 +1,185 @@
+---
+title: "GAP Status Maps"
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r}
+suppressPackageStartupMessages({
+  cwd <- getwd()
+  project_root <- if (basename(cwd) == "scripts") {
+    normalizePath(file.path(cwd, ".."), mustWork = FALSE)
+  } else {
+    normalizePath(file.path(cwd, "projects", "2026-02_gap-maps"), mustWork = FALSE)
+  }
+  project_lib <- file.path(project_root, ".Rlib")
+  if (dir.exists(project_lib)) {
+    .libPaths(c(project_lib, .libPaths()))
+  }
+  library(sf)
+  library(dplyr)
+  library(leaflet)
+  library(knitr)
+})
+
+cwd <- getwd()
+project_root <- if (basename(cwd) == "scripts") {
+  normalizePath(file.path(cwd, ".."), mustWork = FALSE)
+} else {
+  normalizePath(file.path(cwd, "projects", "2026-02_gap-maps"), mustWork = FALSE)
+}
+
+gpkg_path <- file.path(project_root, "data", "new_SSN_GAP.gpkg")
+layer_name <- "new_SSN_GAP"
+
+if (!file.exists(gpkg_path)) {
+  stop("GeoPackage not found at: ", gpkg_path)
+}
+
+sf_obj <- st_read(gpkg_path, layer = layer_name, quiet = TRUE)
+attrs <- st_drop_geometry(sf_obj)
+
+site_field <- if ("Property_n" %in% names(attrs)) "Property_n" else "Property_1"
+owner_field <- if ("Organizati" %in% names(attrs)) "Organizati" else NA_character_
+gap_field <- if ("reGAP" %in% names(attrs)) "reGAP" else NA_character_
+```
+
+## All Sites Table
+
+```{r}
+if (!is.na(owner_field) && !is.na(gap_field)) {
+  all_sites <- sf_obj %>%
+    st_drop_geometry() %>%
+    select(
+      site = all_of(site_field),
+      owner = all_of(owner_field),
+      gap = all_of(gap_field)
+    ) %>%
+    arrange(owner, site)
+
+  knitr::kable(all_sites, caption = "All sites with owner and GAP status")
+} else {
+  "Owner or GAP field not found."
+}
+```
+
+## GAP Map (All Sites)
+
+```{r}
+if (!is.na(gap_field)) {
+  geom_type <- unique(as.character(st_geometry_type(sf_obj)))
+  geom_type <- geom_type[1]
+
+  pal <- colorFactor(
+    palette = c("#d73027", "#fc8d59", "#fee08b", "#91bfdb", "#4575b4"),
+    domain = sf_obj[[gap_field]]
+  )
+
+  sf_obj$gap_display <- sf_obj[[gap_field]]
+  sf_obj$site_display <- sf_obj[[site_field]]
+
+  leaf <- leaflet(sf_obj) %>% addTiles()
+  if (grepl("POINT", geom_type)) {
+    leaf <- leaf %>%
+      addCircleMarkers(
+        radius = 5,
+        stroke = FALSE,
+        fillOpacity = 0.7,
+        fillColor = ~pal(gap_display),
+        popup = ~paste0("Property: ", site_display, "<br>GAP: ", gap_display)
+      )
+  } else {
+    leaf <- leaf %>%
+      addPolygons(
+        color = "#ffffff",
+        weight = 0.5,
+        fillColor = ~pal(gap_display),
+        fillOpacity = 0.6,
+        popup = ~paste0("Property: ", site_display, "<br>GAP: ", gap_display)
+      )
+  }
+
+  leaf %>% addLegend("bottomright", pal = pal, values = ~gap_display, title = "GAP Status")
+} else {
+  "GAP field not found."
+}
+```
+
+## Site Tables By Owner
+
+```{r}
+if (!is.na(owner_field) && !is.na(gap_field)) {
+  all_sites <- sf_obj %>%
+    st_drop_geometry() %>%
+    select(
+      site = all_of(site_field),
+      owner = all_of(owner_field),
+      gap = all_of(gap_field)
+    ) %>%
+    arrange(owner, site)
+
+  owners <- sort(unique(all_sites$owner))
+  owners <- owners[!is.na(owners)]
+
+  for (o in owners) {
+    cat("\n\n### Owner:", o, "\n\n")
+    owner_sites <- all_sites %>% filter(owner == o)
+    knitr::kable(owner_sites, caption = paste("Sites for", o))
+  }
+} else {
+  "Owner or GAP field not found."
+}
+```
+
+## Maps By Owner
+
+```{r}
+if (!is.na(owner_field) && !is.na(gap_field)) {
+  geom_type <- unique(as.character(st_geometry_type(sf_obj)))
+  geom_type <- geom_type[1]
+
+  owners <- sort(unique(sf_obj[[owner_field]]))
+  owners <- owners[!is.na(owners)]
+
+  pal <- colorFactor(
+    palette = c("#d73027", "#fc8d59", "#fee08b", "#91bfdb", "#4575b4"),
+    domain = sf_obj[[gap_field]]
+  )
+
+  for (o in owners) {
+    cat("\n\n### Map for Owner:", o, "\n\n")
+    owner_sf <- sf_obj %>% filter(.data[[owner_field]] == o)
+
+    owner_sf$gap_display <- owner_sf[[gap_field]]
+    owner_sf$site_display <- owner_sf[[site_field]]
+
+    leaf <- leaflet(owner_sf) %>% addTiles()
+    if (grepl("POINT", geom_type)) {
+      leaf <- leaf %>%
+        addCircleMarkers(
+          radius = 5,
+          stroke = FALSE,
+          fillOpacity = 0.7,
+          fillColor = ~pal(gap_display),
+          popup = ~paste0("Property: ", site_display, "<br>GAP: ", gap_display)
+        )
+    } else {
+      leaf <- leaf %>%
+        addPolygons(
+          color = "#ffffff",
+          weight = 0.5,
+          fillColor = ~pal(gap_display),
+          fillOpacity = 0.6,
+          popup = ~paste0("Property: ", site_display, "<br>GAP: ", gap_display)
+        )
+    }
+
+    print(leaf %>% addLegend("bottomright", pal = pal, values = ~gap_display, title = "GAP Status"))
+  }
+} else {
+  "Owner or GAP field not found."
+}
+```

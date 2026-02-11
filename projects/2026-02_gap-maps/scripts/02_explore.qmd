@@ -1,0 +1,192 @@
+---
+title: "Explore new_SSN_GAP"
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r}
+suppressPackageStartupMessages({
+  cwd <- getwd()
+  project_root <- if (basename(cwd) == "scripts") {
+    normalizePath(file.path(cwd, ".."), mustWork = FALSE)
+  } else {
+    normalizePath(file.path(cwd, "projects", "2026-02_gap-maps"), mustWork = FALSE)
+  }
+  project_lib <- file.path(project_root, ".Rlib")
+  if (dir.exists(project_lib)) {
+    .libPaths(c(project_lib, .libPaths()))
+  }
+  library(sf)
+  library(dplyr)
+  library(leaflet)
+  library(knitr)
+})
+
+cwd <- getwd()
+project_root <- if (basename(cwd) == "scripts") {
+  normalizePath(file.path(cwd, ".."), mustWork = FALSE)
+} else {
+  normalizePath(file.path(cwd, "projects", "2026-02_gap-maps"), mustWork = FALSE)
+}
+
+gpkg_path <- file.path(project_root, "data", "new_SSN_GAP.gpkg")
+layer_name <- "new_SSN_GAP"
+
+if (!file.exists(gpkg_path)) {
+  stop("GeoPackage not found at: ", gpkg_path)
+}
+
+sf_obj <- st_read(gpkg_path, layer = layer_name, quiet = TRUE)
+attrs <- st_drop_geometry(sf_obj)
+
+site_field <- if ("Property_n" %in% names(attrs)) "Property_n" else "Property_1"
+owner_field <- if ("Organizati" %in% names(attrs)) "Organizati" else NA_character_
+gap_field <- if ("reGAP" %in% names(attrs)) "reGAP" else NA_character_
+```
+
+## Summary
+
+```{r}
+list(
+  features = nrow(sf_obj),
+  fields = ncol(st_drop_geometry(sf_obj)),
+  geometry_types = table(as.character(st_geometry_type(sf_obj))),
+  crs = st_crs(sf_obj),
+  bbox = st_bbox(sf_obj)
+)
+```
+
+## Field Inventory
+
+```{r}
+field_inventory <- tibble(
+  field = names(attrs),
+  class = vapply(attrs, function(x) class(x)[1], character(1)),
+  missing = vapply(attrs, function(x) sum(is.na(x)), integer(1)),
+  missing_pct = round(100 * missing / nrow(attrs), 1),
+  unique = vapply(attrs, function(x) dplyr::n_distinct(x), integer(1))
+)
+
+field_inventory %>% arrange(desc(missing_pct))
+```
+
+## Categorical Value Snapshots
+
+```{r}
+cat_fields <- names(attrs)[vapply(attrs, function(x) is.character(x) || is.factor(x), logical(1))]
+
+snapshot <- lapply(cat_fields, function(f) {
+  tibble(
+    field = f,
+    value = names(sort(table(attrs[[f]]), decreasing = TRUE))[1:10],
+    n = as.integer(sort(table(attrs[[f]]), decreasing = TRUE))[1:10]
+  )
+})
+
+bind_rows(snapshot)
+```
+
+## Numeric Distributions
+
+```{r}
+num_fields <- names(attrs)[vapply(attrs, is.numeric, logical(1))]
+num_fields
+```
+
+```{r}
+par(mfrow = c(2, 2))
+for (f in num_fields) {
+  hist(attrs[[f]], main = f, xlab = f, col = "gray85", border = "white")
+}
+par(mfrow = c(1, 1))
+```
+
+## GAP Status Snapshot
+
+```{r}
+if ("reGAP" %in% names(attrs)) {
+  attrs %>% count(reGAP, sort = TRUE)
+} else {
+  "Field reGAP not found."
+}
+```
+
+## Companion Excel (Optional)
+
+```{r}
+if (requireNamespace("readxl", quietly = TRUE)) {
+  excel_files <- list.files(file.path(project_root, "data_raw"), pattern = "\\.xlsx$", full.names = TRUE)
+  excel_files
+} else {
+  "Package readxl not installed. If you want to read the companion Excel, install readxl."
+}
+```
+
+```{r}
+glimpse(st_drop_geometry(sf_obj))
+```
+
+## Map Preview (Interactive)
+
+```{r}
+geom_type <- unique(as.character(st_geometry_type(sf_obj)))
+geom_type <- geom_type[1]
+
+leaf <- leaflet(sf_obj) %>% addTiles()
+
+if (grepl("POINT", geom_type)) {
+  leaf <- leaf %>% addCircleMarkers(radius = 3, stroke = FALSE, fillOpacity = 0.7)
+} else if (grepl("LINE", geom_type)) {
+  leaf <- leaf %>% addPolylines(weight = 2, opacity = 0.8)
+} else {
+  leaf <- leaf %>% addPolygons(weight = 1, fillOpacity = 0.4)
+}
+
+leaf
+```
+
+## Map by GAP Status (Interactive)
+
+```{r}
+if ("reGAP" %in% names(sf_obj)) {
+  pal <- colorFactor(
+    palette = c("#d73027", "#fc8d59", "#fee08b", "#91bfdb", "#4575b4"),
+    domain = sf_obj$reGAP
+  )
+
+  geom_type <- unique(as.character(st_geometry_type(sf_obj)))
+  geom_type <- geom_type[1]
+
+  sf_obj$gap_display <- sf_obj$reGAP
+  sf_obj$site_display <- sf_obj$Property_n
+
+  leaf <- leaflet(sf_obj) %>% addTiles()
+
+  if (grepl("POINT", geom_type)) {
+    leaf <- leaf %>%
+      addCircleMarkers(
+        radius = 5,
+        stroke = FALSE,
+        fillOpacity = 0.7,
+        fillColor = ~pal(gap_display),
+        popup = ~paste0("Property: ", site_display, "<br>GAP: ", gap_display)
+      )
+  } else {
+    leaf <- leaf %>%
+      addPolygons(
+        color = "#ffffff",
+        weight = 0.5,
+        fillColor = ~pal(gap_display),
+        fillOpacity = 0.6,
+        popup = ~paste0("Property: ", site_display, "<br>GAP: ", gap_display)
+      )
+  }
+
+  leaf %>% addLegend("bottomright", pal = pal, values = ~gap_display, title = "GAP Status")
+} else {
+  "Field reGAP not found."
+}
+```
