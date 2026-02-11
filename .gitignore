@@ -7,9 +7,6 @@
 .DS_Store
 **/.Rlib/
 
-**/data_raw/
-**/outputs/
-
 *.shp
 *.shx
 *.dbf
