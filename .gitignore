@@ -6,11 +6,3 @@
 **/.DS_Store
 .DS_Store
 **/.Rlib/
-
-*.shp
-*.shx
-*.dbf
-*.prj
-*.cpg
-*.sbn
-*.sbx
