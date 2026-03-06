@@ -1,0 +1,135 @@
+---
+title: "Explore cassn_gap_status"
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  cwd <- getwd()
+  project_root <- if (basename(cwd) == "scripts") {
+    normalizePath(file.path(cwd, ".."), mustWork = FALSE)
+  } else if (basename(cwd) == "2026-02_gap-maps") {
+    normalizePath(cwd, mustWork = FALSE)
+  } else {
+    normalizePath(file.path(cwd, "projects", "2026-02_gap-maps"), mustWork = FALSE)
+  }
+  project_lib <- file.path(project_root, ".Rlib")
+  if (dir.exists(project_lib)) .libPaths(c(project_lib, .libPaths()))
+  library(sf)
+  library(dplyr)
+  library(readr)
+  library(leaflet)
+  library(knitr)
+})
+
+csv_path <- file.path(project_root, "data", "cassn_gap_status.csv")
+if (!file.exists(csv_path)) stop("Run 01_extract_gap_status.R first: ", csv_path)
+
+sites_df <- read_csv(csv_path, show_col_types = FALSE)
+
+org_group_map <- c(CDFW = "CDFW", UCNRS = "NRS", CSU = "CSU", TNC = "TNC", Pepperwood = "Pepperwood")
+org_levels    <- c("CDFW", "NRS", "CSU", "TNC", "Pepperwood")
+gap_levels    <- c("GAP 1", "GAP 2", "GAP 3", "GAP 4", "No Data")
+
+sites_df <- sites_df %>%
+  mutate(
+    org_group = factor(org_group_map[organization], levels = org_levels),
+    gap_label = factor(
+      ifelse(is.na(gap_status), "No Data", paste0("GAP ", gap_status)),
+      levels = gap_levels
+    )
+  )
+
+sites_sf <- st_as_sf(sites_df, coords = c("longitude", "latitude"), crs = 4326)
+
+gap_palette <- c(
+  "GAP 1"   = "#0B6E4F",
+  "GAP 2"   = "#F2C300",
+  "GAP 3"   = "#F28E1C",
+  "GAP 4"   = "#C81D25",
+  "No Data" = "#AAAAAA"
+)
+```
+
+## Summary
+
+```{r}
+list(
+  total_sites   = nrow(sites_df),
+  organizations = sort(unique(sites_df$organization)),
+  gap_counts    = table(sites_df$gap_label, useNA = "ifany")
+)
+```
+
+## Site Counts by Organization
+
+```{r}
+sites_df %>%
+  count(organization, org_group) %>%
+  arrange(org_group, organization) %>%
+  knitr::kable()
+```
+
+## GAP Status Distribution
+
+```{r}
+sites_df %>%
+  count(gap_label, .drop = FALSE) %>%
+  knitr::kable()
+```
+
+## GAP Status by Org Group
+
+```{r}
+sites_df %>%
+  count(org_group, gap_label, .drop = FALSE) %>%
+  arrange(org_group, gap_label) %>%
+  knitr::kable()
+```
+
+## Sites with No PAD-US Coverage
+
+```{r}
+sites_df %>%
+  filter(is.na(gap_status)) %>%
+  select(organization, campus, site_name) %>%
+  arrange(organization, site_name) %>%
+  knitr::kable(caption = paste(sum(is.na(sites_df$gap_status)), "sites outside all PAD-US polygons"))
+```
+
+## All Sites Table
+
+```{r}
+sites_df %>%
+  select(Organization = organization, `Site Name` = site_name, `GAP Status` = gap_label) %>%
+  arrange(Organization, `Site Name`) %>%
+  knitr::kable()
+```
+
+## Interactive Map (Color = GAP Status)
+
+```{r}
+pal <- colorFactor(
+  palette = unname(gap_palette[gap_levels]),
+  levels  = gap_levels
+)
+
+leaflet(sites_sf) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    radius      = 5,
+    stroke      = FALSE,
+    fillOpacity = 0.85,
+    fillColor   = ~pal(gap_label),
+    popup       = ~paste0(
+      "<b>", site_name, "</b><br>",
+      "Org: ", organization, " (", org_group, ")<br>",
+      "GAP: ", gap_label
+    )
+  ) %>%
+  addLegend("bottomright", pal = pal, values = ~gap_label, title = "GAP Status")
+```

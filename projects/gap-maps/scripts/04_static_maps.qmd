@@ -1,0 +1,301 @@
+---
+title: "GAP Status Static Maps"
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  cwd <- getwd()
+  project_root <- if (basename(cwd) == "scripts") {
+    normalizePath(file.path(cwd, ".."), mustWork = FALSE)
+  } else if (basename(cwd) == "2026-02_gap-maps") {
+    normalizePath(cwd, mustWork = FALSE)
+  } else {
+    normalizePath(file.path(cwd, "projects", "2026-02_gap-maps"), mustWork = FALSE)
+  }
+  project_lib <- file.path(project_root, ".Rlib")
+  if (dir.exists(project_lib)) .libPaths(c(project_lib, .libPaths()))
+  library(sf)
+  library(dplyr)
+  library(tidyr)
+  library(readr)
+  library(ggplot2)
+  library(ggnewscale)
+  library(tigris)
+  library(rmapshaper)
+  library(rnaturalearth)
+  library(elevatr)
+  library(terra)
+  library(gridExtra)
+  library(grid)
+})
+
+out_dir <- file.path(project_root, "outputs", "maps")
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+csv_path <- file.path(project_root, "data", "cassn_gap_status.csv")
+if (!file.exists(csv_path)) stop("Run 01_extract_gap_status.R first: ", csv_path)
+
+sites_df <- read_csv(csv_path, show_col_types = FALSE)
+
+org_group_map <- c(CDFW = "CDFW", UCNRS = "NRS", CSU = "CSU", TNC = "TNC", Pepperwood = "Pepperwood")
+org_levels    <- c("CDFW", "NRS", "CSU", "TNC", "Pepperwood")
+gap_levels    <- c("GAP 1", "GAP 2", "GAP 3", "GAP 4", "No Data")
+
+sites_df <- sites_df %>%
+  mutate(
+    org_group  = factor(org_group_map[organization], levels = org_levels),
+    gap_factor = factor(
+      ifelse(is.na(gap_status), "No Data", paste0("GAP ", gap_status)),
+      levels = gap_levels
+    )
+  )
+
+sites_sf <- st_as_sf(sites_df, coords = c("longitude", "latitude"), crs = 4326)
+
+# --- California outline (WGS 84) ---
+options(tigris_use_cache = TRUE)
+ca <- tigris::states(cb = TRUE, year = 2023, class = "sf") %>%
+  filter(NAME == "California") %>%
+  st_transform(4326)
+ca <- rmapshaper::ms_simplify(ca, keep = 0.08, keep_shapes = TRUE)
+
+ca_bb  <- st_bbox(ca)
+water_color <- "#D6E8F2"  # very light blue-gray
+
+# --- Lakes intersecting California (includes border lakes like Tahoe) ---
+sf::sf_use_s2(FALSE)  # disable spherical geometry to handle Natural Earth edge cases
+lakes <- rnaturalearth::ne_download(
+  scale = 50, type = "lakes", category = "physical", returnclass = "sf"
+) %>%
+  st_transform(4326) %>%
+  st_make_valid() %>%
+  st_filter(st_buffer(ca, 0.05))  # keeps only lakes touching CA or within ~5km of border
+sf::sf_use_s2(TRUE)
+
+# --- Elevation hillshade (AWS terrain tiles via elevatr, zoom level 6) ---
+ca_bb_sf <- st_as_sf(st_as_sfc(st_bbox(ca)))
+ca_elev  <- elevatr::get_elev_raster(locations = ca_bb_sf, z = 6, clip = "bbox")
+ca_terra <- terra::rast(ca_elev)
+slope    <- terra::terrain(ca_terra, "slope",  unit = "radians")
+aspect   <- terra::terrain(ca_terra, "aspect", unit = "radians")
+hs       <- terra::shade(slope, aspect, angle = 30, direction = 315)
+hs       <- terra::mask(hs, terra::vect(ca))
+
+hs_df           <- as.data.frame(hs, xy = TRUE)
+names(hs_df)[3] <- "hillshade"
+hs_df           <- hs_df[!is.na(hs_df$hillshade), ]
+hs_range        <- range(hs_df$hillshade)
+hs_df$hillshade <- (hs_df$hillshade - hs_range[1]) / (hs_range[2] - hs_range[1])
+
+# --- Scales ---
+gap_palette <- c(
+  "GAP 1"   = "#0B6E4F",
+  "GAP 2"   = "#F2C300",
+  "GAP 3"   = "#F28E1C",
+  "GAP 4"   = "#C81D25",
+  "No Data" = "#AAAAAA"
+)
+
+org_shapes <- c(CDFW = 16, NRS = 17, CSU = 15, TNC = 18, Pepperwood = 25)
+
+# --- Map function (legend.position = "none"; legend extracted separately) ---
+plot_map <- function(data_sf, title, subtitle = NULL) {
+  ggplot() +
+    # Layer 1: hillshade (fill scale #1 — geom_raster in WGS84 degrees)
+    geom_raster(data = hs_df, aes(x = x, y = y, fill = hillshade), alpha = 0.45) +
+    scale_fill_gradient(low = "#666666", high = "#FFFFFF", guide = "none") +
+    # Reset fill scale before site points
+    ggnewscale::new_scale_fill() +
+    # Layer 3: CA outline only — hillshade shows through land
+    geom_sf(data = ca, fill = NA, color = "#909090", linewidth = 0.5) +
+    # Layer 4: major lakes (on top of hillshade)
+    geom_sf(data = lakes, fill = water_color, color = NA) +
+    # Layer 5: sentinel sites (fill scale #2)
+    geom_sf(
+      data  = data_sf,
+      aes(color = gap_factor, fill = gap_factor, shape = org_group),
+      size  = 2.2,
+      alpha = 0.9
+    ) +
+    scale_color_manual(
+      values = gap_palette, limits = gap_levels, drop = FALSE, name = "GAP Status"
+    ) +
+    scale_fill_manual(
+      values = gap_palette, limits = gap_levels, drop = FALSE, guide = "none"
+    ) +
+    scale_shape_manual(
+      values = org_shapes,
+      limits = org_levels,
+      drop   = FALSE,
+      name   = "Organization",
+      guide  = guide_legend(override.aes = list(fill = "gray30", color = "gray30"))
+    ) +
+    coord_sf(
+      crs    = 4326,
+      xlim   = c(ca_bb["xmin"], ca_bb["xmax"]),
+      ylim   = c(ca_bb["ymin"], ca_bb["ymax"]),
+      expand = FALSE
+    ) +
+    labs(title = title, subtitle = subtitle) +
+    theme_minimal(base_size = 12) +
+    theme(
+      panel.grid        = element_blank(),
+      panel.background  = element_rect(fill = "white", color = NA),
+      axis.title        = element_blank(),
+      axis.text         = element_blank(),
+      legend.position   = "none",
+      plot.title        = element_text(face = "bold", size = 15, hjust = 0.05),
+      plot.subtitle     = element_text(size = 12, hjust = 0.05, color = "#555555")
+    )
+}
+
+# --- Extract combined legend (GAP Status + Organization side by side) ---
+extract_legend <- function(data_sf) {
+  p <- plot_map(data_sf, title = "") +
+    theme(
+      legend.position   = "right",
+      legend.box        = "horizontal",
+      legend.direction  = "vertical",
+      legend.title      = element_text(size = 10, face = "bold"),
+      legend.text       = element_text(size = 9),
+      legend.key.size   = unit(0.45, "cm"),
+      legend.background = element_rect(fill = "white", color = NA)
+    )
+  pg        <- ggplotGrob(p)
+  guide_idx <- which(grepl("guide-box", pg$layout$name))
+  if (length(guide_idx) == 0) guide_idx <- which(grepl("guide", pg$layout$name))
+  pg$grobs[[guide_idx[1]]]
+}
+
+# --- Cross-tab table: rows = GAP status, cols = org ---
+make_gap_org_table <- function(data_sf) {
+  df <- st_drop_geometry(data_sf)
+
+  full_grid <- expand.grid(
+    gap_factor = gap_levels,
+    org_group  = org_levels,
+    stringsAsFactors = FALSE
+  )
+
+  counts <- df %>%
+    mutate(
+      gap_factor = as.character(gap_factor),
+      org_group  = as.character(org_group)
+    ) %>%
+    count(gap_factor, org_group) %>%
+    right_join(full_grid, by = c("gap_factor", "org_group")) %>%
+    mutate(n = replace_na(n, 0L))
+
+  wide <- counts %>%
+    pivot_wider(names_from = org_group, values_from = n, values_fill = 0L)
+
+  for (col in setdiff(org_levels, names(wide))) wide[[col]] <- 0L
+  wide <- wide[match(gap_levels, wide$gap_factor), c("gap_factor", org_levels)]
+  wide$Total <- rowSums(wide[, org_levels, drop = FALSE])
+
+  total_vals <- colSums(wide[, c(org_levels, "Total"), drop = FALSE])
+  total_row  <- data.frame(
+    gap_factor = "Total",
+    as.data.frame(t(total_vals)),
+    check.names = FALSE
+  )
+  wide <- bind_rows(as.data.frame(wide), total_row)
+  names(wide)[names(wide) == "gap_factor"] <- "GAP Status"
+  wide
+}
+
+# --- Compose: map | (legends side-by-side + table) ---
+compose_panel <- function(data_sf, title, subtitle = NULL) {
+  map_plot  <- plot_map(data_sf, title, subtitle)
+  leg_grob  <- extract_legend(data_sf)
+  tab_df    <- make_gap_org_table(data_sf)
+
+  n_data <- nrow(tab_df) - 1L
+  n_cols <- ncol(tab_df)
+  row_fills    <- c(rep(c("white", "#F5F5F5"), length.out = n_data), "#BEBEBE")
+  row_fontface <- c(rep("plain", n_data), "bold")
+
+  # Build fill matrix: base fill from row_fills, override Total column with dark gray
+  fill_matrix <- matrix(rep(row_fills, n_cols), nrow = nrow(tab_df), ncol = n_cols)
+  fill_matrix[, n_cols] <- "#BEBEBE"
+
+  # Build fontface matrix: base from row_fontface, Total column always bold
+  fontface_matrix <- matrix(rep(row_fontface, n_cols), nrow = nrow(tab_df), ncol = n_cols)
+  fontface_matrix[, n_cols] <- "bold"
+
+  colhead_fills <- c(rep("#EFEFEF", n_cols - 1L), "#BEBEBE")
+
+  table_grob <- gridExtra::tableGrob(
+    tab_df,
+    rows  = NULL,
+    theme = gridExtra::ttheme_minimal(
+      core = list(
+        fg_params = list(fontsize = 10, fontface = fontface_matrix),
+        bg_params = list(fill = fill_matrix)
+      ),
+      colhead = list(
+        fg_params = list(fontsize = 10, fontface = "bold"),
+        bg_params = list(fill = colhead_fills)
+      ),
+      padding = grid::unit(c(3, 3), "mm")
+    )
+  )
+
+  right_panel <- gridExtra::arrangeGrob(
+    leg_grob,
+    grid::nullGrob(),
+    table_grob,
+    ncol    = 1,
+    heights = c(1.4, 0.15, 1)
+  )
+
+  gridExtra::arrangeGrob(
+    map_plot,
+    right_panel,
+    ncol   = 2,
+    widths = c(2.8, 2.2)
+  )
+}
+
+save_map <- function(plot_obj, filename) {
+  ggsave(
+    filename = file.path(out_dir, filename),
+    plot     = plot_obj,
+    width    = 11,
+    height   = 8.5,
+    dpi      = 300
+  )
+}
+```
+
+## All Sites
+
+```{r}
+all_panel <- compose_panel(
+  sites_sf,
+  title    = "CASSN GAP Protection Status",
+  subtitle = "Planned and existing sites"
+)
+save_map(all_panel, "gap_all_sites.png")
+all_panel
+```
+
+## By Organization
+
+```{r}
+org_display <- c(CDFW = "CDFW", NRS = "UCNRS", CSU = "CSU", TNC = "TNC", Pepperwood = "Pepperwood")
+
+for (og in org_levels) {
+  og_sf    <- sites_sf %>% filter(org_group == og)
+  og_label <- org_display[og]
+  p        <- compose_panel(og_sf, paste0("CASSN GAP Protection Status — ", og_label), subtitle = "Planned and existing sites")
+  safe     <- gsub("[^A-Za-z0-9]+", "_", og_label)
+  save_map(p, paste0("gap_owner_", safe, ".png"))
+  print(p)
+}
+```
