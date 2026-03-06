@@ -5,10 +5,10 @@
 cwd <- getwd()
 project_root <- if (basename(cwd) == "scripts") {
   normalizePath(file.path(cwd, ".."), mustWork = FALSE)
-} else if (basename(cwd) == "2026-02_gap-maps") {
+} else if (basename(cwd) %in% c("gap-maps", "2026-02_gap-maps")) {
   normalizePath(cwd, mustWork = FALSE)
 } else {
-  normalizePath(file.path(cwd, "projects", "2026-02_gap-maps"), mustWork = FALSE)
+  normalizePath(file.path(cwd, "projects", "gap-maps"), mustWork = FALSE)
 }
 project_lib <- file.path(project_root, ".Rlib")
 

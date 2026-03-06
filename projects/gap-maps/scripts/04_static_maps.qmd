@@ -12,10 +12,10 @@ suppressPackageStartupMessages({
   cwd <- getwd()
   project_root <- if (basename(cwd) == "scripts") {
     normalizePath(file.path(cwd, ".."), mustWork = FALSE)
-  } else if (basename(cwd) == "2026-02_gap-maps") {
+  } else if (basename(cwd) %in% c("gap-maps", "2026-02_gap-maps")) {
     normalizePath(cwd, mustWork = FALSE)
   } else {
-    normalizePath(file.path(cwd, "projects", "2026-02_gap-maps"), mustWork = FALSE)
+    normalizePath(file.path(cwd, "projects", "gap-maps"), mustWork = FALSE)
   }
   project_lib <- file.path(project_root, ".Rlib")
   if (dir.exists(project_lib)) .libPaths(c(project_lib, .libPaths()))
@@ -40,7 +40,11 @@ if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE, showWarnings = F
 csv_path <- file.path(project_root, "data", "cassn_gap_status.csv")
 if (!file.exists(csv_path)) stop("Run 01_extract_gap_status.R first: ", csv_path)
 
+lookup_path <- file.path(project_root, "data", "gap_status_lookup.csv")
+if (!file.exists(lookup_path)) stop("Run 01_extract_gap_status.R first: ", lookup_path)
+
 sites_df <- read_csv(csv_path, show_col_types = FALSE)
+lookup_df <- read_csv(lookup_path, show_col_types = FALSE)
 
 org_group_map <- c(CDFW = "CDFW", UCNRS = "NRS", CSU = "CSU", TNC = "TNC", Pepperwood = "Pepperwood")
 org_levels    <- c("CDFW", "NRS", "CSU", "TNC", "Pepperwood")
@@ -209,11 +213,29 @@ make_gap_org_table <- function(data_sf) {
   wide
 }
 
-# --- Compose: map | (legends side-by-side + table) ---
+# --- GAP lookup table for map output ---
+make_gap_lookup_table <- function() {
+  lookup <- lookup_df %>%
+    transmute(
+      `GAP Status` = paste0("GAP ", gap_status),
+      Meaning = description
+    )
+
+  no_data_row <- tibble::tibble(
+    `GAP Status` = "No Data",
+    Meaning = "No PAD-US overlap or GAP status unavailable."
+  )
+
+  bind_rows(lookup, no_data_row) %>%
+    mutate(Meaning = vapply(Meaning, function(x) paste(strwrap(x, width = 48), collapse = "\n"), character(1)))
+}
+
+# --- Compose: map | (legend + lookup + cross-tab table) ---
 compose_panel <- function(data_sf, title, subtitle = NULL) {
   map_plot  <- plot_map(data_sf, title, subtitle)
   leg_grob  <- extract_legend(data_sf)
   tab_df    <- make_gap_org_table(data_sf)
+  lookup_df <- make_gap_lookup_table()
 
   n_data <- nrow(tab_df) - 1L
   n_cols <- ncol(tab_df)
@@ -246,12 +268,55 @@ compose_panel <- function(data_sf, title, subtitle = NULL) {
     )
   )
 
+  lookup_grob <- gridExtra::tableGrob(
+    lookup_df,
+    rows  = NULL,
+    theme = gridExtra::ttheme_minimal(
+      core = list(
+        fg_params = list(fontsize = 9, hjust = 0, x = 0.02),
+        bg_params = list(fill = rep(c("white", "#F8F8F8"), length.out = nrow(lookup_df)))
+      ),
+      colhead = list(
+        fg_params = list(fontsize = 10, fontface = "bold", hjust = 0, x = 0.02),
+        bg_params = list(fill = "#EFEFEF")
+      ),
+      padding = grid::unit(c(2.5, 2.5), "mm")
+    )
+  )
+
+  add_title_row <- function(tbl, title_text) {
+    n_cols <- length(tbl$widths)
+    titled <- gtable::gtable_add_rows(tbl, heights = grid::unit(6, "mm"), pos = 0)
+    titled <- gtable::gtable_add_grob(
+      titled,
+      grobs = grid::rectGrob(gp = grid::gpar(fill = "white", col = NA)),
+      t = 1, b = 1, l = 1, r = n_cols,
+      clip = "off",
+      name = "title_bg"
+    )
+    titled <- gtable::gtable_add_grob(
+      titled,
+      grobs = grid::textGrob(
+        title_text,
+        x = 0.5, y = 0.5, hjust = 0.5, vjust = 0.5,
+        gp = grid::gpar(fontsize = 10, fontface = "bold", col = "#222222")
+      ),
+      t = 1, b = 1, l = 1, r = n_cols,
+      clip = "off",
+      name = "title_text"
+    )
+    titled
+  }
+
+  counts_block <- add_title_row(table_grob, "Site Counts by GAP Status and Organization")
+  lookup_block <- add_title_row(lookup_grob, "GAP Status Definitions")
+
   right_panel <- gridExtra::arrangeGrob(
     leg_grob,
-    grid::nullGrob(),
-    table_grob,
+    counts_block,
+    lookup_block,
     ncol    = 1,
-    heights = c(1.4, 0.15, 1)
+    heights = c(1.15, 1, 1)
   )
 
   gridExtra::arrangeGrob(
