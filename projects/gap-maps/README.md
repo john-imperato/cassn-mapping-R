@@ -7,7 +7,6 @@ This project maps and summarizes GAP protection status for CASSN sites using PAD
 - Assigns each CASSN site a GAP status (1-4, or `NA` when no overlap is found).
 - Produces tabular outputs for analysis.
 - Produces map outputs for all sites and by organization.
-- Includes GAP status definitions directly in the static map outputs.
 
 ## Data Sources
 
